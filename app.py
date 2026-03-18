@@ -46,7 +46,13 @@ st.markdown(f"**⏰ 현재 분석 시각 (정확한 KST):** `{kst_now.strftime('
 def load_data(ticker, inv):
     try:
         p = "7d" if inv == '1m' else "60d" if inv in ['5m', '15m'] else "2y"
-        return yf.download(ticker, period=p, interval=inv, progress=False)
+        df = yf.download(ticker, period=p, interval=inv, progress=False)
+        
+        # [핵심 에러 해결] yfinance 최신 버전의 MultiIndex 오류를 평탄화시켜서 방지
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        return df
     except:
         return pd.DataFrame()
 
@@ -56,13 +62,18 @@ if df.empty or len(df) < 30:
     st.error("❌ 데이터를 불러올 수 없습니다. 종목 코드가 맞는지 확인해주세요.")
 else:
     # --- 5. 퀀트 지표 계산 ---
-    close = df['Close']
+    # [핵심 에러 해결] .squeeze()를 사용해 2D 표를 1D 선으로 확실하게 변환
+    close = df['Close'].squeeze()
+    high = df['High'].squeeze()
+    low = df['Low'].squeeze()
+    vol = df['Volume'].squeeze()
+    
     df['SMA20'] = close.rolling(20).mean()
     df['BB_Upper'] = df['SMA20'] + (close.rolling(20).std() * 2)
     df['BB_Lower'] = df['SMA20'] - (close.rolling(20).std() * 2)
     
     # VWAP 계산
-    df['VWAP'] = ((df['High']+df['Low']+df['Close'])/3 * df['Volume']).rolling(20).sum() / df['Volume'].rolling(20).sum()
+    df['VWAP'] = ((high + low + close) / 3 * vol).rolling(20).sum() / vol.rolling(20).sum()
     
     # MACD 계산
     exp1, exp2 = close.ewm(span=12).mean(), close.ewm(span=26).mean()
@@ -75,7 +86,7 @@ else:
     df['RSI'] = 100 - (100 / (1 + up/down))
     
     # OBV 계산
-    df['OBV'] = (np.sign(close.diff()) * df['Volume']).fillna(0).cumsum()
+    df['OBV'] = (np.sign(close.diff()) * vol).fillna(0).cumsum()
 
     # --- 6. [핵심] 자동 매수/매도 시그널 로직 ---
     # ① VWAP 시그널 (돌파시 매수, 이탈시 매도)
@@ -98,18 +109,18 @@ else:
     sig_p = float(df['Signal'].iloc[-1])
     
     # 과거 20일 기준 지지/저항선
-    supp = float(df['Low'].tail(20).min())
-    resi = float(df['High'].tail(20).max())
+    supp = float(low.tail(20).min())
+    resi = float(high.tail(20).max())
     if supp == resi: supp, resi = curr_p * 0.95, curr_p * 1.05
 
     # 변동성 기반 미래 주가 예측 (Drift + Volatility Model)
-    ret = df['Close'].pct_change().fillna(0)
-    mu, vol = ret.mean(), ret.std()
-    if pd.isna(vol) or vol == 0: vol = 0.02
+    ret = close.pct_change().fillna(0)
+    mu, vol_std = ret.mean(), ret.std()
+    if pd.isna(vol_std) or vol_std == 0: vol_std = 0.02
     
-    pred_1d = curr_p * (1 + mu*1 + vol*np.sqrt(1))
-    pred_1w = curr_p * (1 + mu*5 + vol*np.sqrt(5))
-    pred_1m = curr_p * (1 + mu*20 + vol*np.sqrt(20))
+    pred_1d = curr_p * (1 + mu*1 + vol_std*np.sqrt(1))
+    pred_1w = curr_p * (1 + mu*5 + vol_std*np.sqrt(5))
+    pred_1m = curr_p * (1 + mu*20 + vol_std*np.sqrt(20))
 
     # --- 8. 화면 구성 (탭 분리) ---
     tab1, tab2 = st.tabs(["📊 1. 분리형 퀀트 차트 & 지표 가이드", "🤖 2. AI 미래 주가 예측 & 전략 리포트"])
@@ -186,7 +197,7 @@ else:
     # ==========================================
     with tab2:
         st.header(f"🎯 AI 시뮬레이션: {raw_ticker} 미래 주가 예측")
-        st.write("과거 데이터의 평균 수익률과 일일 변동성(Volatility)을 수학적으로 계산하여 도출한 예측값입니다.")
+        st.write("과거 20일간의 평균 수익률과 일일 변동성(Volatility)을 수학적으로 시뮬레이션한 예측값입니다.")
         
         # 1일, 1주, 1달 예측치 (가장 크게 명시)
         p1, p2, p3 = st.columns(3)
